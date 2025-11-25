@@ -8,7 +8,7 @@ import path from 'path';
 import authRoutes from './routes/auth.js';
 import jobRoutes from './routes/jobs.js';
 import userRoutes from './routes/users.js';
-import applicationRoutes from './routes/applications.js'; // Add this import
+import applicationRoutes from './routes/applications.js';
 
 dotenv.config();
 
@@ -21,8 +21,24 @@ console.log('   PORT:', process.env.PORT ? `✅ Set to: ${process.env.PORT}` : '
 
 const app = express();
 
+// CORS configuration for production and development
+app.use(cors({
+  origin: [
+    'http://localhost:3000', // Local development
+    'http://localhost:5173', // Vite development server
+    'https://mern-final-project-atsienoclaire.vercel.app/', // Your Vercel frontend
+    'https://mern-final-project-atsienoclaire-2.onrender.com' // Your Render backend (for API calls between services)
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
+}));
+
+// Handle preflight requests
+app.options('*', cors());
+
 // Middleware
-app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
@@ -30,14 +46,28 @@ app.use(express.urlencoded({ extended: false }));
 app.use('/api/auth', authRoutes);
 app.use('/api/jobs', jobRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/applications', applicationRoutes); // Add this line
+app.use('/api/applications', applicationRoutes);
 
 // Serve uploaded files
 app.use('/uploads', express.static('uploads'));
 
 // Basic route
 app.get('/api', (req, res) => {
-  res.json({ message: 'Youth Employment Platform API' });
+  res.json({ 
+    message: 'Youth Employment Platform API',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Health check route
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'Server is running',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
 });
 
 // MongoDB connection
@@ -55,4 +85,9 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 CORS enabled for:`);
+  console.log(`   - http://localhost:3000`);
+  console.log(`   - http://localhost:5173`);
+  console.log(`   - https://mern-final-project-atsienoclaire.vercel.app/`);
+  console.log(`   - https://mern-final-project-atsienoclaire-2.onrender.com`);
 });
