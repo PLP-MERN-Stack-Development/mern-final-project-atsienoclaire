@@ -5,6 +5,230 @@ import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
 
+// ========== SPECIFIC ROUTES FIRST ==========
+
+// @desc    Get job seeker's applications
+// @route   GET /api/jobs/my-applications
+// @access  Private (Job Seeker)
+router.get('/my-applications', protect, authorize('jobseeker'), async (req, res) => {
+  try {
+    const jobsWithApplications = await Job.find({
+      'applications.jobSeeker': req.user.id
+    })
+      .populate('employer', 'name company')
+      .select('title company location jobType applications')
+      .sort({ createdAt: -1 });
+
+    // Extract applications for the current user
+    const userApplications = jobsWithApplications.flatMap(job => 
+      job.applications
+        .filter(app => app.jobSeeker.toString() === req.user.id)
+        .map(app => ({
+          _id: app._id,
+          job: {
+            _id: job._id,
+            title: job.title,
+            company: job.company,
+            location: job.location,
+            jobType: job.jobType
+          },
+          status: app.status,
+          appliedAt: app.appliedAt,
+          coverLetter: app.coverLetter
+        }))
+    );
+
+    res.json({
+      success: true,
+      count: userApplications.length,
+      data: userApplications
+    });
+  } catch (error) {
+    console.error('Get my applications error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching applications'
+    });
+  }
+});
+
+// @desc    Get employer's jobs
+// @route   GET /api/jobs/my-jobs
+// @access  Private (Employer)
+router.get('/my-jobs', protect, authorize('employer'), async (req, res) => {
+  try {
+    console.log('🟡 [MY-JOBS] Route started');
+    console.log('🔐 User ID:', req.user.id);
+    console.log('👤 User role:', req.user.role);
+    
+    // Check if user ID is valid
+    if (!req.user.id || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+      console.log('❌ Invalid user ID:', req.user.id);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user ID'
+      });
+    }
+
+    console.log('🔍 Querying database for jobs...');
+    
+    // First try without populate to isolate the issue
+    const jobsWithoutPopulate = await Job.find({ employer: req.user.id })
+      .sort({ createdAt: -1 });
+
+    console.log('✅ Basic query successful. Jobs found:', jobsWithoutPopulate.length);
+    
+    // Now try with populate
+    const jobs = await Job.find({ employer: req.user.id })
+      .populate({
+        path: 'applications.jobSeeker',
+        select: 'name email profile',
+        options: { retainNullValues: true }
+      })
+      .sort({ createdAt: -1 });
+
+    console.log('✅ Populate query successful');
+    
+    // Log sample job data to check structure
+    if (jobs.length > 0) {
+      console.log('📝 Sample job details:', {
+        id: jobs[0]._id,
+        title: jobs[0].title,
+        salary: jobs[0].salary,
+        salaryType: typeof jobs[0].salary,
+        applications: jobs[0].applications?.length,
+        firstApplication: jobs[0].applications?.[0] ? {
+          hasJobSeeker: !!jobs[0].applications[0].jobSeeker,
+          jobSeekerType: typeof jobs[0].applications[0].jobSeeker
+        } : 'No applications'
+      });
+    }
+    
+    res.json({
+      success: true,
+      count: jobs.length,
+      data: jobs
+    });
+    
+  } catch (error) {
+    console.error('🔴 [MY-JOBS] CRITICAL ERROR:');
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
+    if (error.name === 'MongoError' || error.name === 'MongoServerError') {
+      console.error('🗄️ MongoDB Error Details:');
+      console.error('Error code:', error.code);
+    }
+    
+    if (error.name === 'ValidationError') {
+      console.error('📋 Validation Errors:');
+      Object.keys(error.errors).forEach(key => {
+        console.error(`- ${key}:`, error.errors[key].message);
+      });
+    }
+    
+    if (error.message.includes('populate') || error.message.includes('Cast to ObjectId failed')) {
+      console.error('🔗 Population error detected - trying fallback query...');
+      try {
+        const fallbackJobs = await Job.find({ employer: req.user.id })
+          .select('-applications')
+          .sort({ createdAt: -1 });
+        
+        console.log('🔄 Fallback query successful, jobs:', fallbackJobs.length);
+        
+        return res.json({
+          success: true,
+          count: fallbackJobs.length,
+          data: fallbackJobs,
+          note: 'Applications not loaded due to data inconsistency'
+        });
+      } catch (fallbackError) {
+        console.error('🔴 Fallback also failed:', fallbackError.message);
+      }
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching your jobs',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
+      ...(process.env.NODE_ENV === 'development' && { 
+        stack: error.stack
+      })
+    });
+  }
+});
+
+// @desc    Get jobs for job seeker (all active jobs)
+// @route   GET /api/jobs/available
+// @access  Private (Job Seeker)
+router.get('/available', protect, authorize('jobseeker'), async (req, res) => {
+  try {
+    const {
+      category,
+      location,
+      jobType,
+      search,
+      page = 1,
+      limit = 10
+    } = req.query;
+
+    // Build query object - only active jobs
+    let query = { isActive: true };
+
+    // Filter by category
+    if (category && category !== 'All') {
+      query.category = category;
+    }
+
+    // Filter by location
+    if (location) {
+      query.location = new RegExp(location, 'i');
+    }
+
+    // Filter by job type
+    if (jobType && jobType !== 'All') {
+      query.jobType = jobType;
+    }
+
+    // Search in title, description, or company
+    if (search) {
+      query.$or = [
+        { title: new RegExp(search, 'i') },
+        { description: new RegExp(search, 'i') },
+        { company: new RegExp(search, 'i') }
+      ];
+    }
+
+    // Execute query with pagination
+    const jobs = await Job.find(query)
+      .populate('employer', 'name company')
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .sort({ createdAt: -1 });
+
+    // Get total count for pagination
+    const total = await Job.countDocuments(query);
+
+    res.json({
+      success: true,
+      count: jobs.length,
+      total,
+      pagination: {
+        page: Number(page),
+        pages: Math.ceil(total / limit)
+      },
+      data: jobs
+    });
+  } catch (error) {
+    console.error('Get available jobs error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching available jobs'
+    });
+  }
+});
+
 // @desc    Debug job creation - Check what data is being sent
 // @route   POST /api/jobs/debug-create
 // @access  Private (Employer/Admin)
@@ -50,71 +274,6 @@ router.post('/debug-create', protect, authorize('employer', 'admin'), async (req
       success: false,
       message: 'Debug failed',
       error: error.message
-    });
-  }
-});
-
-// @desc    Create new job
-// @route   POST /api/jobs
-// @access  Private (Employer/Admin)
-router.post('/', protect, authorize('employer', 'admin'), async (req, res) => {
-  try {
-    console.log('🟡 [CREATE JOB] Starting job creation...');
-    console.log('📝 Request body:', JSON.stringify(req.body, null, 2));
-    console.log('👤 User ID:', req.user.id);
-
-    // Add employer to req.body
-    req.body.employer = req.user.id;
-
-    // Ensure all required fields are present with defaults if needed
-    const jobData = {
-      ...req.body,
-      // Ensure optional fields have defaults
-      responsibilities: req.body.responsibilities || 'Not specified',
-      experienceLevel: req.body.experienceLevel || 'Entry',
-      skills: req.body.skills || [],
-      benefits: req.body.benefits || [],
-      isActive: true
-    };
-
-    console.log('🔍 Final job data before creation:', jobData);
-
-    const job = await Job.create(jobData);
-
-    console.log('✅ Job created successfully:', job._id);
-
-    // Populate employer details
-    await job.populate('employer', 'name company');
-
-    res.status(201).json({
-      success: true,
-      data: job
-    });
-  } catch (error) {
-    console.error('🔴 [CREATE JOB] ERROR:');
-    console.error('Error name:', error.name);
-    console.error('Error message:', error.message);
-    
-    // Handle validation errors
-    if (error.name === 'ValidationError') {
-      console.error('📋 VALIDATION ERRORS:');
-      const errors = Object.values(error.errors).map(val => {
-        console.error(`- ${val.path}: ${val.message} (value: ${val.value})`);
-        return val.message;
-      });
-      
-      return res.status(400).json({
-        success: false,
-        message: 'Validation error',
-        errors: errors
-      });
-    }
-    
-    console.error('Full error stack:', error.stack);
-    
-    res.status(500).json({
-      success: false,
-      message: 'Server error while creating job'
     });
   }
 });
@@ -256,109 +415,111 @@ router.post('/test-apply/:id', protect, authorize('jobseeker'), async (req, res)
   }
 });
 
-// @desc    Get employer's jobs
-// @route   GET /api/jobs/my-jobs
-// @access  Private (Employer)
-router.get('/my-jobs', protect, authorize('employer'), async (req, res) => {
+// @desc    Get all jobs with filtering and pagination
+// @route   GET /api/jobs
+// @access  Public
+router.get('/', async (req, res) => {
   try {
-    console.log('🟡 [MY-JOBS] Route started');
-    console.log('🔐 User ID:', req.user.id);
-    console.log('👤 User role:', req.user.role);
-    
-    // Check if user ID is valid
-    if (!req.user.id || !mongoose.Types.ObjectId.isValid(req.user.id)) {
-      console.log('❌ Invalid user ID:', req.user.id);
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid user ID'
-      });
+    const {
+      category,
+      location,
+      jobType,
+      search,
+      page = 1,
+      limit = 10
+    } = req.query;
+
+    // Build query object
+    let query = { isActive: true };
+
+    // Filter by category
+    if (category && category !== 'All') {
+      query.category = category;
     }
 
-    console.log('🔍 Querying database for jobs...');
-    
-    // First try without populate to isolate the issue
-    const jobsWithoutPopulate = await Job.find({ employer: req.user.id })
-      .sort({ createdAt: -1 });
-
-    console.log('✅ Basic query successful. Jobs found:', jobsWithoutPopulate.length);
-    
-    // Now try with populate
-    const jobs = await Job.find({ employer: req.user.id })
-      .populate({
-        path: 'applications.jobSeeker',
-        select: 'name email profile',
-        options: { retainNullValues: true }
-      })
-      .sort({ createdAt: -1 });
-
-    console.log('✅ Populate query successful');
-    
-    // Log sample job data to check structure
-    if (jobs.length > 0) {
-      console.log('📝 Sample job details:', {
-        id: jobs[0]._id,
-        title: jobs[0].title,
-        salary: jobs[0].salary,
-        salaryType: typeof jobs[0].salary,
-        applications: jobs[0].applications?.length,
-        firstApplication: jobs[0].applications?.[0] ? {
-          hasJobSeeker: !!jobs[0].applications[0].jobSeeker,
-          jobSeekerType: typeof jobs[0].applications[0].jobSeeker
-        } : 'No applications'
-      });
+    // Filter by location
+    if (location) {
+      query.location = new RegExp(location, 'i');
     }
-    
+
+    // Filter by job type
+    if (jobType && jobType !== 'All') {
+      query.jobType = jobType;
+    }
+
+    // Search in title, description, or company
+    if (search) {
+      query.$or = [
+        { title: new RegExp(search, 'i') },
+        { description: new RegExp(search, 'i') },
+        { company: new RegExp(search, 'i') }
+      ];
+    }
+
+    // Execute query with pagination
+    const jobs = await Job.find(query)
+      .populate('employer', 'name company')
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .sort({ createdAt: -1 });
+
+    // Get total count for pagination
+    const total = await Job.countDocuments(query);
+
     res.json({
       success: true,
       count: jobs.length,
+      total,
+      pagination: {
+        page: Number(page),
+        pages: Math.ceil(total / limit)
+      },
       data: jobs
     });
-    
   } catch (error) {
-    console.error('🔴 [MY-JOBS] CRITICAL ERROR:');
-    console.error('Error name:', error.name);
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    
-    if (error.name === 'MongoError' || error.name === 'MongoServerError') {
-      console.error('🗄️ MongoDB Error Details:');
-      console.error('Error code:', error.code);
-    }
-    
-    if (error.name === 'ValidationError') {
-      console.error('📋 Validation Errors:');
-      Object.keys(error.errors).forEach(key => {
-        console.error(`- ${key}:`, error.errors[key].message);
-      });
-    }
-    
-    if (error.message.includes('populate') || error.message.includes('Cast to ObjectId failed')) {
-      console.error('🔗 Population error detected - trying fallback query...');
-      try {
-        const fallbackJobs = await Job.find({ employer: req.user.id })
-          .select('-applications')
-          .sort({ createdAt: -1 });
-        
-        console.log('🔄 Fallback query successful, jobs:', fallbackJobs.length);
-        
-        return res.json({
-          success: true,
-          count: fallbackJobs.length,
-          data: fallbackJobs,
-          note: 'Applications not loaded due to data inconsistency'
-        });
-      } catch (fallbackError) {
-        console.error('🔴 Fallback also failed:', fallbackError.message);
-      }
-    }
-    
+    console.error('Get jobs error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error while fetching your jobs',
-      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
-      ...(process.env.NODE_ENV === 'development' && { 
-        stack: error.stack
-      })
+      message: 'Server error while fetching jobs'
+    });
+  }
+});
+
+// ========== PARAMETER ROUTES LAST ==========
+
+// @desc    Get single job
+// @route   GET /api/jobs/:id
+// @access  Public
+router.get('/:id', async (req, res) => {
+  try {
+    // Validate if it's a valid ObjectId first
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid job ID format'
+      });
+    }
+
+    const job = await Job.findById(req.params.id)
+      .populate('employer', 'name email profile company')
+      .populate('applications.jobSeeker', 'name email profile');
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        message: 'Job not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: job
+    });
+  } catch (error) {
+    console.error('Get job error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching job'
     });
   }
 });
@@ -507,101 +668,67 @@ router.post('/:id/apply', protect, authorize('jobseeker'), async (req, res) => {
   }
 });
 
-// @desc    Get all jobs with filtering and pagination
-// @route   GET /api/jobs
-// @access  Public
-router.get('/', async (req, res) => {
+// @desc    Create new job
+// @route   POST /api/jobs
+// @access  Private (Employer/Admin)
+router.post('/', protect, authorize('employer', 'admin'), async (req, res) => {
   try {
-    const {
-      category,
-      location,
-      jobType,
-      search,
-      page = 1,
-      limit = 10
-    } = req.query;
+    console.log('🟡 [CREATE JOB] Starting job creation...');
+    console.log('📝 Request body:', JSON.stringify(req.body, null, 2));
+    console.log('👤 User ID:', req.user.id);
 
-    // Build query object
-    let query = { isActive: true };
+    // Add employer to req.body
+    req.body.employer = req.user.id;
 
-    // Filter by category
-    if (category && category !== 'All') {
-      query.category = category;
-    }
+    // Ensure all required fields are present with defaults if needed
+    const jobData = {
+      ...req.body,
+      // Ensure optional fields have defaults
+      responsibilities: req.body.responsibilities || 'Not specified',
+      experienceLevel: req.body.experienceLevel || 'Entry',
+      skills: req.body.skills || [],
+      benefits: req.body.benefits || [],
+      isActive: true
+    };
 
-    // Filter by location
-    if (location) {
-      query.location = new RegExp(location, 'i');
-    }
+    console.log('🔍 Final job data before creation:', jobData);
 
-    // Filter by job type
-    if (jobType && jobType !== 'All') {
-      query.jobType = jobType;
-    }
+    const job = await Job.create(jobData);
 
-    // Search in title, description, or company
-    if (search) {
-      query.$or = [
-        { title: new RegExp(search, 'i') },
-        { description: new RegExp(search, 'i') },
-        { company: new RegExp(search, 'i') }
-      ];
-    }
+    console.log('✅ Job created successfully:', job._id);
 
-    // Execute query with pagination
-    const jobs = await Job.find(query)
-      .populate('employer', 'name company')
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-      .sort({ createdAt: -1 });
+    // Populate employer details
+    await job.populate('employer', 'name company');
 
-    // Get total count for pagination
-    const total = await Job.countDocuments(query);
-
-    res.json({
-      success: true,
-      count: jobs.length,
-      total,
-      pagination: {
-        page: Number(page),
-        pages: Math.ceil(total / limit)
-      },
-      data: jobs
-    });
-  } catch (error) {
-    console.error('Get jobs error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while fetching jobs'
-    });
-  }
-});
-
-// @desc    Get single job
-// @route   GET /api/jobs/:id
-// @access  Public
-router.get('/:id', async (req, res) => {
-  try {
-    const job = await Job.findById(req.params.id)
-      .populate('employer', 'name email profile company')
-      .populate('applications.jobSeeker', 'name email profile');
-
-    if (!job) {
-      return res.status(404).json({
-        success: false,
-        message: 'Job not found'
-      });
-    }
-
-    res.json({
+    res.status(201).json({
       success: true,
       data: job
     });
   } catch (error) {
-    console.error('Get job error:', error);
+    console.error('🔴 [CREATE JOB] ERROR:');
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      console.error('📋 VALIDATION ERRORS:');
+      const errors = Object.values(error.errors).map(val => {
+        console.error(`- ${val.path}: ${val.message} (value: ${val.value})`);
+        return val.message;
+      });
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Validation error',
+        errors: errors
+      });
+    }
+    
+    console.error('Full error stack:', error.stack);
+    
     res.status(500).json({
       success: false,
-      message: 'Server error while fetching job'
+      message: 'Server error while creating job'
     });
   }
 });
@@ -611,6 +738,14 @@ router.get('/:id', async (req, res) => {
 // @access  Private (Employer/Admin)
 router.put('/:id', protect, authorize('employer', 'admin'), async (req, res) => {
   try {
+    // Validate job ID first
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid job ID format'
+      });
+    }
+
     let job = await Job.findById(req.params.id);
 
     if (!job) {
@@ -651,6 +786,14 @@ router.put('/:id', protect, authorize('employer', 'admin'), async (req, res) => 
 // @access  Private (Employer/Admin)
 router.delete('/:id', protect, authorize('employer', 'admin'), async (req, res) => {
   try {
+    // Validate job ID first
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid job ID format'
+      });
+    }
+
     const job = await Job.findById(req.params.id);
 
     if (!job) {
@@ -683,126 +826,19 @@ router.delete('/:id', protect, authorize('employer', 'admin'), async (req, res) 
   }
 });
 
-// @desc    Get jobs for job seeker (all active jobs)
-// @route   GET /api/jobs/available
-// @access  Private (Job Seeker)
-router.get('/available', protect, authorize('jobseeker'), async (req, res) => {
-  try {
-    const {
-      category,
-      location,
-      jobType,
-      search,
-      page = 1,
-      limit = 10
-    } = req.query;
-
-    // Build query object - only active jobs
-    let query = { isActive: true };
-
-    // Filter by category
-    if (category && category !== 'All') {
-      query.category = category;
-    }
-
-    // Filter by location
-    if (location) {
-      query.location = new RegExp(location, 'i');
-    }
-
-    // Filter by job type
-    if (jobType && jobType !== 'All') {
-      query.jobType = jobType;
-    }
-
-    // Search in title, description, or company
-    if (search) {
-      query.$or = [
-        { title: new RegExp(search, 'i') },
-        { description: new RegExp(search, 'i') },
-        { company: new RegExp(search, 'i') }
-      ];
-    }
-
-    // Execute query with pagination
-    const jobs = await Job.find(query)
-      .populate('employer', 'name company')
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-      .sort({ createdAt: -1 });
-
-    // Get total count for pagination
-    const total = await Job.countDocuments(query);
-
-    res.json({
-      success: true,
-      count: jobs.length,
-      total,
-      pagination: {
-        page: Number(page),
-        pages: Math.ceil(total / limit)
-      },
-      data: jobs
-    });
-  } catch (error) {
-    console.error('Get available jobs error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while fetching available jobs'
-    });
-  }
-});
-
-// @desc    Get job seeker's applications
-// @route   GET /api/jobs/my-applications
-// @access  Private (Job Seeker)
-router.get('/my-applications', protect, authorize('jobseeker'), async (req, res) => {
-  try {
-    const jobsWithApplications = await Job.find({
-      'applications.jobSeeker': req.user.id
-    })
-      .populate('employer', 'name company')
-      .select('title company location jobType applications')
-      .sort({ createdAt: -1 });
-
-    // Extract applications for the current user
-    const userApplications = jobsWithApplications.flatMap(job => 
-      job.applications
-        .filter(app => app.jobSeeker.toString() === req.user.id)
-        .map(app => ({
-          _id: app._id,
-          job: {
-            _id: job._id,
-            title: job.title,
-            company: job.company,
-            location: job.location,
-            jobType: job.jobType
-          },
-          status: app.status,
-          appliedAt: app.appliedAt,
-          coverLetter: app.coverLetter
-        }))
-    );
-
-    res.json({
-      success: true,
-      count: userApplications.length,
-      data: userApplications
-    });
-  } catch (error) {
-    console.error('Get my applications error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while fetching applications'
-    });
-  }
-});
-
 // @desc    Get applications for a specific job (Employer only)
 // @route   GET /api/jobs/:id/applications
 // @access  Private (Employer)
 router.get('/:id/applications', protect, authorize('employer'), async (req, res) => {
   try {
+    // Validate job ID first
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid job ID format'
+      });
+    }
+
     const job = await Job.findById(req.params.id)
       .populate('applications.jobSeeker', 'name email profile');
 
