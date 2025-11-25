@@ -19,15 +19,26 @@ console.log('   JWT_EXPIRE:', process.env.JWT_EXPIRE ? `✅ Set to: ${process.en
 console.log('   MONGODB_URI:', process.env.MONGODB_URI ? '✅ Set' : '❌ Missing');
 console.log('   PORT:', process.env.PORT ? `✅ Set to: ${process.env.PORT}` : '❌ Missing');
 
+// ✅ Generate default JWT secret if missing (for development)
+if (!process.env.JWT_SECRET) {
+  console.log('⚠️  JWT_SECRET not found, using development default');
+  process.env.JWT_SECRET = 'dev-secret-key-change-in-production-' + Date.now();
+}
+
+if (!process.env.JWT_EXPIRE) {
+  console.log('⚠️  JWT_EXPIRE not found, using default: 30d');
+  process.env.JWT_EXPIRE = '30d';
+}
+
 const app = express();
 
-// CORS configuration for production and development
+// ✅ FIXED CORS configuration - removed trailing slash and simplified
 app.use(cors({
   origin: [
     'http://localhost:3000', // Local development
     'http://localhost:5173', // Vite development server
-    'https://mern-final-project-atsienoclaire.vercel.app/', // Your Vercel frontend
-    'https://mern-final-project-atsienoclaire-2.onrender.com' // Your Render backend (for API calls between services)
+    'https://mern-final-project-atsienoclaire.vercel.app', // Your Vercel frontend - REMOVED TRAILING SLASH
+    'https://mern-final-project-atsienoclaire-2.onrender.com' // Your Render backend
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -35,8 +46,8 @@ app.use(cors({
   exposedHeaders: ['Content-Range', 'X-Content-Range']
 }));
 
-// Handle preflight requests
-app.options('*', cors());
+// ✅ REMOVED the problematic preflight handler - CORS middleware handles this automatically
+// app.options('*', cors()); // ← This was causing the PathError
 
 // Middleware
 app.use(express.json());
@@ -66,7 +77,8 @@ app.get('/api/health', (req, res) => {
     status: 'OK',
     message: 'Server is running',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
   });
 });
 
@@ -88,6 +100,6 @@ app.listen(PORT, () => {
   console.log(`🌐 CORS enabled for:`);
   console.log(`   - http://localhost:3000`);
   console.log(`   - http://localhost:5173`);
-  console.log(`   - https://mern-final-project-atsienoclaire.vercel.app/`);
+  console.log(`   - https://mern-final-project-atsienoclaire.vercel.app`); // Fixed logging
   console.log(`   - https://mern-final-project-atsienoclaire-2.onrender.com`);
 });
