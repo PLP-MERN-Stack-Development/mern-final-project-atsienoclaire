@@ -12,7 +12,7 @@ import applicationRoutes from './routes/applications.js';
 
 dotenv.config();
 
-// ✅ Add environment variable validation here
+// ✅ Environment variable validation
 console.log('🔧 Environment check:');
 console.log('   JWT_SECRET:', process.env.JWT_SECRET ? '✅ Set' : '❌ Missing');
 console.log('   JWT_EXPIRE:', process.env.JWT_EXPIRE ? `✅ Set to: ${process.env.JWT_EXPIRE}` : '❌ Missing');
@@ -32,12 +32,12 @@ if (!process.env.JWT_EXPIRE) {
 
 const app = express();
 
-// ✅ FIXED CORS configuration - removed trailing slash and simplified
+// ✅ CORS configuration
 app.use(cors({
   origin: [
     'http://localhost:3000', // Local development
     'http://localhost:5173', // Vite development server
-    'https://mern-final-project-atsienoclaire.vercel.app', // Your Vercel frontend - REMOVED TRAILING SLASH
+    'https://mern-final-project-atsienoclaire.vercel.app', // Your Vercel frontend
     'https://mern-final-project-atsienoclaire-2.onrender.com' // Your Render backend
   ],
   credentials: true,
@@ -45,9 +45,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
   exposedHeaders: ['Content-Range', 'X-Content-Range']
 }));
-
-// ✅ REMOVED the problematic preflight handler - CORS middleware handles this automatically
-// app.options('*', cors()); // ← This was causing the PathError
 
 // Middleware
 app.use(express.json());
@@ -67,7 +64,8 @@ app.get('/api', (req, res) => {
   res.json({ 
     message: 'Youth Employment Platform API',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
   });
 });
 
@@ -82,24 +80,96 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// MongoDB connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/youth-employment';
+// Database connection with better error handling
+const connectDB = async () => {
+  try {
+    const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/youth-employment';
+    
+    console.log('🔗 Attempting MongoDB connection...');
+    
+    const conn = await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000, // 10 second timeout
+      socketTimeoutMS: 45000, // 45 second socket timeout
+      maxPoolSize: 10, // Maximum number of sockets in the connection pool
+    });
 
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ MongoDB connected successfully'))
-  .catch(err => {
-    console.error('❌ MongoDB connection error:', err);
-    process.exit(1);
-  });
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    console.log(`📊 Database: ${conn.connection.name}`);
+    
+    return conn;
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error);
+    
+    // More specific error handling
+    if (error.name === 'MongooseServerSelectionError') {
+      console.log('\n💡 IP WHITELIST SOLUTION:');
+      console.log('   1. Go to MongoDB Atlas Dashboard');
+      console.log('   2. Navigate to Network Access');
+      console.log('   3. Add IP Address: 0.0.0.0/0');
+      console.log('   4. Or add Render-specific IP ranges');
+      console.log('   🔗 https://cloud.mongodb.com/v2/#/security/network/');
+    } else if (error.name === 'MongoNetworkError') {
+      console.log('\n💡 NETWORK SOLUTION:');
+      console.log('   Check your MongoDB connection string and network settings');
+    }
+    
+    // Don't exit immediately - let the server start but without DB
+    console.log('🔄 Server will start without database connection. Some features may not work.');
+    return null;
+  }
+};
+
+// MongoDB connection events
+mongoose.connection.on('connected', () => {
+  console.log('🔌 MongoDB connected successfully');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('🔌 MongoDB disconnected');
+});
+
+// Handle application termination
+process.on('SIGINT', async () => {
+  await mongoose.connection.close();
+  console.log('🛑 MongoDB connection closed due to app termination');
+  process.exit(0);
+});
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🌐 CORS enabled for:`);
-  console.log(`   - http://localhost:3000`);
-  console.log(`   - http://localhost:5173`);
-  console.log(`   - https://mern-final-project-atsienoclaire.vercel.app`); // Fixed logging
-  console.log(`   - https://mern-final-project-atsienoclaire-2.onrender.com`);
+// Start server with database connection
+const startServer = async () => {
+  // Connect to database first
+  await connectDB();
+  
+  // Then start the server
+  app.listen(PORT, () => {
+    console.log(`\n🚀 Server running on port ${PORT}`);
+    console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🌐 CORS enabled for:`);
+    console.log(`   - http://localhost:3000`);
+    console.log(`   - http://localhost:5173`);
+    console.log(`   - https://mern-final-project-atsienoclaire.vercel.app`);
+    console.log(`   - https://mern-final-project-atsienoclaire-2.onrender.com`);
+    console.log(`\n📍 Health check: https://mern-final-project-atsienoclaire-2.onrender.com/api/health`);
+    console.log(`📍 API status: https://mern-final-project-atsienoclaire-2.onrender.com/api`);
+    
+    // Warn if database is not connected
+    if (mongoose.connection.readyState !== 1) {
+      console.log('\n⚠️  WARNING: Database is not connected. Some features will not work.');
+      console.log('   Please check MongoDB Atlas IP whitelist settings.');
+    }
+  });
+};
+
+// Start the application
+startServer().catch(error => {
+  console.error('❌ Failed to start server:', error);
+  process.exit(1);
 });
+
+export default app;
