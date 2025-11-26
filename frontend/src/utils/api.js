@@ -1,7 +1,7 @@
 import axios from 'axios';
 
-// Use environment variable for API URL with fallbacks
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+// Use environment variable for API URL with fallbacks - UPDATED TO YOUR RENDER BACKEND
+const API_URL = import.meta.env.VITE_API_URL || 'https://mern-final-project-atsienoclaire-2.onrender.com/api';
 
 // Log the API URL for debugging (remove in production if needed)
 console.log('🔗 API Base URL:', API_URL);
